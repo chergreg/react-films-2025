@@ -1,6 +1,6 @@
 import axios from "axios";
-import type { Movie } from "@/types/domains";
-import type { MovieTMDB } from "@/types/tmdb";
+import type { Movie } from "../types/domains";
+import type { MovieTMDB, TMDBCastItem } from "../types/tmdb";
 import { mapMovie } from "./mappers";
 
 const api = axios.create({
@@ -15,19 +15,24 @@ function isEmptyText(v?: string | null) {
   return !v || v.trim().length === 0;
 }
 
-/** Champs considérés “essentiels” pour décider d'appeler EN */
 function isEssentialMissing(m?: MovieTMDB) {
   if (!m) return true;
   const missingOverview = isEmptyText(m.overview);
   const missingTagline = isEmptyText(m.tagline);
   const missingGenres = !m.genres || m.genres.length === 0;
-  // On déclenche EN si l’un des essentiels manque
   return missingOverview || missingTagline || missingGenres;
 }
 
-/** Merge FR avec EN: privilégie FR, comble les trous avec EN */
+async function fetchMovieWithCredits(id: string, language: string) {
+  const { data } = await api.get<MovieTMDB>(`/movie/${id}`, {
+    params: { language, append_to_response: "credits" },
+  });
+  return data;
+}
+
+/** Merge FR avec EN pour le film ET le casting (champ par champ) */
 function mergeMovieFRwithEN(fr: MovieTMDB, en: MovieTMDB): MovieTMDB {
-  return {
+  const merged: MovieTMDB = {
     ...fr,
     title: !isEmptyText(fr.title) ? fr.title : en.title,
     original_title: !isEmptyText(fr.original_title) ? fr.original_title : en.original_title,
@@ -38,55 +43,72 @@ function mergeMovieFRwithEN(fr: MovieTMDB, en: MovieTMDB): MovieTMDB {
     release_date: fr.release_date ?? en.release_date,
     genres: (fr.genres && fr.genres.length > 0) ? fr.genres : (en.genres ?? []),
     vote_average: typeof fr.vote_average === "number" ? fr.vote_average : en.vote_average,
+    credits: {
+      id: fr.credits?.id ?? en.credits?.id ?? fr.id,
+      cast: mergeCast(fr.credits?.cast ?? [], en.credits?.cast ?? []),
+      crew: fr.credits?.crew ?? en.credits?.crew ?? [],
+    },
   };
+  return merged;
 }
 
-async function fetchMovie(id: string, language: string) {
-  const { data } = await api.get<MovieTMDB>(`/movie/${id}`, { params: { language } });
-  return data;
+/** Complete le cast FR avec les champs manquants depuis EN (par id de personne) */
+function mergeCast(frCast: TMDBCastItem[], enCast: TMDBCastItem[]): TMDBCastItem[] {
+  // index EN par id
+  const enById = new Map(enCast.map(c => [c.id, c] as const));
+  const completed = frCast.map(fr => {
+    const en = enById.get(fr.id);
+    if (!en) return fr;
+    return {
+      ...fr,
+      name: !isEmptyText(fr.name) ? fr.name : en.name,
+      character: !isEmptyText(fr.character) ? fr.character : en.character,
+      profile_path: fr.profile_path ?? en.profile_path,
+      order: fr.order ?? en.order,
+    } as TMDBCastItem;
+  });
+  // Si FR est vide, on prend EN
+  return completed.length > 0 ? completed : enCast;
 }
 
 /**
- * getMovieFrThenCompleteWithEn
- * 1) Appel FR (fr-CA ou fr-FR)
- * 2) Si champs manquent, appel en-US et COMPLÉTION
- * 3) Map vers modèle interne Movie
+ * 1) FR (fr-CA ou fr-FR) avec credits
+ * 2) Si essentiels manquent, EN puis merge (film + cast)
+ * 3) map -> modèle interne Movie (incluant cast top 10)
  */
-export async function getMovieFrThenCompleteWithEn(
+export async function getMovieWithCastFrThenCompleteWithEn(
   id: string,
   preferredFr: FR = "fr-CA"
 ): Promise<{
   movie: Movie;
   languageUsed: FR | EN | "fr+en";
   usedFallback: boolean;
-  completedFields: Array<keyof MovieTMDB>;
+  completed: { overview?: boolean; tagline?: boolean; genres?: boolean; cast?: boolean };
 }> {
-  // 1) FR
-  const fr = await fetchMovie(id, preferredFr);
-
-  // 2) Si besoin, EN + merge
+  const fr = await fetchMovieWithCredits(id, preferredFr);
   if (!isEssentialMissing(fr)) {
     return {
       movie: mapMovie(fr),
       languageUsed: preferredFr,
       usedFallback: false,
-      completedFields: [],
+      completed: {},
     };
   }
-
-  const en = await fetchMovie(id, "en-US");
+  const en = await fetchMovieWithCredits(id, "en-US");
   const merged = mergeMovieFRwithEN(fr, en);
 
-  // Lister les champs complétés pour debug/affichage pédagogique
-  const completedFields: Array<keyof MovieTMDB> = [];
-  if (isEmptyText(fr.overview) && !isEmptyText(en.overview)) completedFields.push("overview");
-  if (isEmptyText(fr.tagline) && !isEmptyText(en.tagline)) completedFields.push("tagline");
-  if ((!fr.genres || fr.genres.length === 0) && (en.genres && en.genres.length > 0)) completedFields.push("genres");
+  // Indiquer quels blocs ont été complétés (info pédagogique)
+  const completed = {
+    overview: isEmptyText(fr.overview) && !isEmptyText(en.overview),
+    tagline: isEmptyText(fr.tagline) && !isEmptyText(en.tagline),
+    genres: (!fr.genres || fr.genres.length === 0) && !!(en.genres && en.genres.length > 0),
+    cast: (fr.credits?.cast?.length ?? 0) === 0 && (en.credits?.cast?.length ?? 0) > 0,
+  };
 
   return {
     movie: mapMovie(merged),
-    languageUsed: "fr+en",     // explicite : base FR complétée par EN
+    languageUsed: "fr+en",
     usedFallback: true,
-    completedFields,
+    completed,
   };
 }

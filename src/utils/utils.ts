@@ -1,6 +1,15 @@
+// URL image générique (posters/backdrops)
 export function buildImageUrl(
   path?: string | null,
   size: "w185" | "w342" | "w500" | "original" = "w342"
+) {
+  return path ? `https://image.tmdb.org/t/p/${size}${path}` : undefined;
+}
+
+// URL image pour profils acteurs
+export function buildProfileUrl(
+  path?: string | null,
+  size: "w185" | "w342" | "w500" | "original" = "w185"
 ) {
   return path ? `https://image.tmdb.org/t/p/${size}${path}` : undefined;
 }

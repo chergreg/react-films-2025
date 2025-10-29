@@ -14,5 +14,6 @@ export interface Movie {
   releaseDate?: string;
   year?: string;
   genres: Genre[];
-  rating?: number; // 0..10
+  rating?: number;      // 0..10
+  cast?: import("./ActorCredit").ActorCredit[]; // top 10 casting
 }
